@@ -15,7 +15,8 @@ CONFIG = {
     'num_classes': 7,
     'dropout'    : 0.3,
     'run_name'   : 'baseline_no_clahe',
-    'device'     : 'cuda',   # change to 'cpu' to train on CPU
+    'device'     : 'cuda',   # 'cuda' or 'cpu'
+    'gpu_id'     : 0,        # 0, 1, 2... or 'all' for all GPUs
 }
 
 
@@ -45,6 +46,19 @@ def get_dataloaders(config):
         pin_memory=True
     )
     return train_loader, test_loader
+
+
+def get_device(config):
+    if config['device'] == 'cuda' and torch.cuda.is_available():
+        if config['gpu_id'] == 'all':
+            device = torch.device('cuda')
+        else:
+            device = torch.device(f"cuda:{config['gpu_id']}")
+    else:
+        device = torch.device('cpu')
+        if config['device'] == 'cuda':
+            print('WARNING: cuda not available, falling back to cpu')
+    return device
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device):
@@ -87,20 +101,26 @@ def evaluate(model, loader, criterion, device):
 
 
 def train(config):
-    # device setup from config
-    if config['device'] == 'cuda' and torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-        if config['device'] == 'cuda':
-            print('WARNING: cuda not available, falling back to cpu')
+    device = get_device(config)
 
-    print(f'Training on  : {device}')
-    print(f'GPU          : {torch.cuda.get_device_name(0) if device.type == "cuda" else "N/A"}')
+    # print device info
+    print(f'Training on   : {device}')
+    if device.type == 'cuda':
+        print(f'GPU           : {torch.cuda.get_device_name(device)}')
+        print(f'GPUs available: {torch.cuda.device_count()}')
 
     train_loader, test_loader = get_dataloaders(config)
 
-    model     = EmotionNet(config['num_classes'], config['dropout']).to(device)
+    # build model
+    model = EmotionNet(config['num_classes'], config['dropout'])
+
+    # wrap with DataParallel if using all GPUs
+    if device.type == 'cuda' and config['gpu_id'] == 'all' and torch.cuda.device_count() > 1:
+        print(f'Using {torch.cuda.device_count()} GPUs with DataParallel')
+        model = torch.nn.DataParallel(model)
+
+    model = model.to(device)
+
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, model.parameters()),
