@@ -9,8 +9,11 @@ class EmotionNet(nn.Module):
         # load pretrained EfficientNet-B0
         self.backbone = models.efficientnet_b0(weights='IMAGENET1K_V1')
 
-        # freeze early layers — keep ImageNet features
-        for param in list(self.backbone.parameters())[:-20]:
+        # UPDATED — unfreeze last 40 params instead of 20
+        # more layers can now learn from emotion data
+        # previously [:-20] only trained the final classifier
+        # now [:-40] also trains some of the later feature extraction layers
+        for param in list(self.backbone.parameters())[:-40]:
             param.requires_grad = False
 
         # replace final classifier with 7-class output
@@ -33,7 +36,7 @@ if __name__ == '__main__':
     total     = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total params    : {total:,}')
-    print(f'Trainable params: {trainable:,}')
+    print(f'Trainable params: {trainable:,}')  # should be higher than before
 
     dummy  = torch.randn(4, 3, 48, 48).to(device)
     output = model(dummy)
