@@ -55,6 +55,30 @@ def get_dataloaders(config):
     return train_loader, test_loader
 
 
+# UPDATED — new function to calculate class weights
+# fixes class imbalance problem
+# rare classes (disgust 547 images) get high weight
+# common classes (happy 8989 images) get low weight
+def get_class_weights(config, device):
+    dataset = FERDataset(
+        config['data_dir'],
+        split='train',
+        transform=None
+    )
+    counts = [0] * config['num_classes']
+    for _, label in dataset.samples:
+        counts[label] += 1
+    total = sum(counts)
+    weights = [total / (config['num_classes'] * c) for c in counts]
+
+    print('Class weights:')
+    classes = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+    for i, (c, w) in enumerate(zip(counts, weights)):
+        print(f'  {classes[i]:10s}: {c:5d} images → weight {w:.3f}')
+
+    return torch.tensor(weights, dtype=torch.float).to(device)
+
+
 def get_device(config):
     if config['device'] == 'cuda' and torch.cuda.is_available():
         if config['gpu_id'] == 'all':
@@ -134,25 +158,25 @@ def train(config):
     elif config.get('resume'):
         print(f'WARNING: resume=True but {config["resume_path"]} not found — starting fresh')
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(
+    # UPDATED — class weighted loss instead of plain CrossEntropyLoss
+    # forces model to pay attention to rare classes like disgust and fear
+    weights   = get_class_weights(config, device)
+    criterion = nn.CrossEntropyLoss(weight=weights)
+
+    # UPDATED — AdamW instead of Adam
+    # better weight decay handling for fine-tuning pretrained models
+    # weight_decay=0.01 adds L2 regularization to prevent overfitting
+    optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=config['lr']
+        lr=config['lr'],
+        weight_decay=0.01
     )
 
-    # UPDATED — replaced StepLR with ReduceLROnPlateau
-    # StepLR cuts lr every fixed N epochs regardless of performance
-    # ReduceLROnPlateau only cuts lr when accuracy stops improving
-    # mode='max'    → we want to maximize test_acc
-    # factor=0.5    → cut lr by half when triggered
-    # patience=5    → wait 5 epochs of no improvement before cutting
-    # verbose=True  → print message when lr changes
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='max',
         factor=0.5,
-        patience=5,
-        verbose=True
+        patience=5
     )
 
     best_acc = 0.0
@@ -168,18 +192,16 @@ def train(config):
                 model, test_loader, criterion, device
             )
 
-            # UPDATED — pass test_acc to scheduler instead of calling step() alone
-            # ReduceLROnPlateau needs the metric to decide whether to reduce lr
             scheduler.step(test_acc)
 
-            # log current learning rate to MLflow so we can see when it changes
+            # log current lr every epoch to track when scheduler reduces it
             current_lr = optimizer.param_groups[0]['lr']
 
             print(
                 f"Epoch {epoch+1:02d}/{config['epochs']} | "
                 f"train loss: {train_loss:.4f}  acc: {train_acc:.4f} | "
                 f"test  loss: {test_loss:.4f}  acc: {test_acc:.4f} | "
-                f"lr: {current_lr:.6f}"  # UPDATED — show current lr each epoch
+                f"lr: {current_lr:.6f}"
             )
 
             mlflow.log_metrics({
@@ -187,7 +209,7 @@ def train(config):
                 'train_acc' : train_acc,
                 'test_loss' : test_loss,
                 'test_acc'  : test_acc,
-                'lr'        : current_lr,  # UPDATED — log lr to MLflow
+                'lr'        : current_lr,
             }, step=epoch)
 
             if test_acc > best_acc:
