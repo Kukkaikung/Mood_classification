@@ -35,19 +35,28 @@ class FERDataset(Dataset):
 def get_transforms(split='train'):
     if split == 'train':
         return transforms.Compose([
-            transforms.Resize((48, 48)),
-            transforms.Lambda(apply_clahe),        # CLAHE added here
+            transforms.Resize((224, 224)),          # CHANGED 48→224
+            transforms.Lambda(apply_clahe),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3),
+            transforms.RandomRotation(15),          # CHANGED 10→15
+            transforms.ColorJitter(
+                brightness=0.4,                     # CHANGED 0.3→0.4
+                contrast=0.4,                       # CHANGED 0.3→0.4
+                saturation=0.2                      # NEW
+            ),
+            transforms.RandomGrayscale(p=0.1),      # NEW
+            transforms.RandomAffine(                # NEW
+                degrees=0,
+                translate=(0.1, 0.1)
+            ),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406],
                                  [0.229, 0.224, 0.225])
         ])
     else:
         return transforms.Compose([
-            transforms.Resize((48, 48)),
-            transforms.Lambda(apply_clahe),        # CLAHE added here too
+            transforms.Resize((224, 224)),          # CHANGED 48→224
+            transforms.Lambda(apply_clahe),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406],
                                  [0.229, 0.224, 0.225])
