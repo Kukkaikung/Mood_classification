@@ -13,7 +13,7 @@ class EmotionNet(nn.Module):
         # more layers can now learn from emotion data
         # previously [:-20] only trained the final classifier
         # now [:-40] also trains some of the later feature extraction layers
-        for param in list(self.backbone.parameters())[:-40]:
+        for param in list(self.backbone.parameters())[:-60]:
             param.requires_grad = False
 
         # replace final classifier with 7-class output
