@@ -341,7 +341,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='AudiMood Inference')
     parser.add_argument('--model_path',       type=str,
-                        default='models/best_full_optimized_224.pth')
+                        default='models/best_optimized_dropout05_es.pth')
     parser.add_argument('--source',           type=str, default='webcam')
     parser.add_argument('--device',           type=str, default='cuda')
     parser.add_argument('--max_faces',        type=int, default=20)
