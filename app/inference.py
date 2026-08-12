@@ -226,6 +226,62 @@ def aggregate_emotions(emotions_list):
     return {e: v / n for e, v in crowd.items()}
 
 
+def parse_source(source):
+    """'webcam' -> 0, '1' -> camera index 1, anything else -> file path / stream URL."""
+    if isinstance(source, int):
+        return source
+    if source == 'webcam':
+        return 0
+    if source.isdigit():
+        return int(source)
+    return source
+
+
+def open_capture(source, verbose=True):
+    """Open a camera index or a video file/stream.
+
+    Uses DirectShow on Windows for camera indices — the default MSMF backend
+    can take several seconds to open a device and often fails on index > 0.
+    """
+    src = parse_source(source)
+    if isinstance(src, int):
+        backend = cv2.CAP_DSHOW if sys.platform == 'win32' else cv2.CAP_ANY
+        cap = cv2.VideoCapture(src, backend)
+        if verbose:
+            print(f'Opening camera: index {src}')
+    else:
+        cap = cv2.VideoCapture(src)
+        if verbose:
+            print(f'Opening video : {src}')
+    return cap
+
+
+def list_cameras(max_index=10):
+    """Probe camera indices 0..max_index-1 and print the ones that deliver frames."""
+    print(f'Scanning camera indices 0-{max_index - 1} ...')
+
+    # missing indices make OpenCV log a backend warning — silence it while probing.
+    # cv2 doesn't export the level constants: 0 = SILENT, 3 = WARNING (the default)
+    cv2.setLogLevel(0)
+
+    found = []
+    for idx in range(max_index):
+        cap = open_capture(idx, verbose=False)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                h, w = frame.shape[:2]
+                print(f'  index {idx} : available  ({w}x{h})')
+                found.append(idx)
+        cap.release()
+
+    cv2.setLogLevel(3)
+
+    if not found:
+        print('  no cameras found')
+    return found
+
+
 def run_inference(
     model_path,
     source          = 'webcam',
@@ -244,15 +300,11 @@ def run_inference(
     mtcnn     = MTCNN(keep_all=True, device=device, min_face_size=20)
     transform = get_inference_transform()
 
-    if source == 'webcam':
-        cap = cv2.VideoCapture(0)
-        print('Opening webcam...')
-    else:
-        cap = cv2.VideoCapture(source)
-        print(f'Opening video : {source}')
+    cap = open_capture(source)
 
     if not cap.isOpened():
-        print('ERROR: could not open video source')
+        print(f'ERROR: could not open video source: {source}')
+        print('Run with --list_cameras to see available camera indices')
         return
 
     print('Press Q to quit')
@@ -342,12 +394,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='AudiMood Inference')
     parser.add_argument('--model_path',       type=str,
                         default='models/best_optimized_dropout05_es.pth')
-    parser.add_argument('--source',           type=str, default='webcam')
+    parser.add_argument('--source',           type=str, default='webcam',
+                        help="camera index (0, 1, 2 ...), 'webcam' (= 0), "
+                             "or a path to a video file")
     parser.add_argument('--device',           type=str, default='cuda')
     parser.add_argument('--max_faces',        type=int, default=20)
     parser.add_argument('--smoothing_window', type=int, default=10)
     parser.add_argument('--no_window',        action='store_true')
+    parser.add_argument('--list_cameras',     action='store_true',
+                        help='list available camera indices and exit')
     args = parser.parse_args()
+
+    if args.list_cameras:
+        list_cameras()
+        sys.exit(0)
 
     run_inference(
         model_path       = args.model_path,
