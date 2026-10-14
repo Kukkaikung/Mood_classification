@@ -32,9 +32,9 @@ class FERDataset(Dataset):
         return image, label
 
 
-def get_transforms(split='train'):
+def get_transforms(split='train', random_erasing=0.0):
     if split == 'train':
-        return transforms.Compose([
+        train_tf = transforms.Compose([
             transforms.Resize((224, 224)),          # CHANGED 48→224
             transforms.Lambda(apply_clahe),
             transforms.RandomHorizontalFlip(),
@@ -53,6 +53,11 @@ def get_transforms(split='train'):
             transforms.Normalize([0.485, 0.456, 0.406],
                                  [0.229, 0.224, 0.225])
         ])
+        if random_erasing > 0:
+            # NEW — blank out a random patch so the model can't rely on one face region
+            # works on tensors, so it goes after Normalize
+            train_tf.transforms.append(transforms.RandomErasing(p=random_erasing))
+        return train_tf
     else:
         return transforms.Compose([
             transforms.Resize((224, 224)),          # CHANGED 48→224

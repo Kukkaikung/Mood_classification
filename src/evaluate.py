@@ -16,6 +16,7 @@ from PIL import Image
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score, f1_score
 from src.dataset import FERDataset, get_transforms
 from src.model import EmotionNet
+from src.train import split_train_val
 
 
 CONFIG = {
@@ -30,7 +31,11 @@ CONFIG = {
     'num_workers'    : 0,
     'n_misclassified': 24,            # images in the misclassified grid
     'log_mlflow'     : False,         # True = also log test metrics + figures into the training run
-    'limit'          : None,          # evaluate only the first N test images (quick check)
+    'limit'          : None,          # evaluate only N evenly spaced images (quick check)
+    'split'          : 'test',        # 'test' = final score / 'val' = compare options (e.g. TTA) without touching test
+    'tta'            : False,         # test-time augmentation: average prediction of image + horizontally flipped image
+    'val_split'      : 0.1,           # must match train.py so split='val' rebuilds the same val set
+    'seed'           : 42,
 }
 
 
@@ -48,14 +53,19 @@ def get_device(config):
     return torch.device('cpu')
 
 
-def predict(model, loader, device):
-    # returns true labels, predicted labels and softmax probabilities for the whole test set
+def predict(model, loader, device, tta=False):
+    # returns true labels, predicted labels and softmax probabilities for the whole set
     model.eval()
     all_labels, all_preds, all_probs = [], [], []
 
     with torch.no_grad():
         for images, labels in loader:
-            probs = F.softmax(model(images.to(device)), dim=1).cpu()
+            images = images.to(device)
+            probs  = F.softmax(model(images), dim=1)
+            if tta:
+                # faces are left-right symmetric, so the flipped image is an equally valid view
+                probs = (probs + F.softmax(model(torch.flip(images, dims=[3])), dim=1)) / 2
+            probs = probs.cpu()
             all_probs.append(probs)
             all_preds.append(probs.argmax(dim=1))
             all_labels.append(labels)
@@ -162,7 +172,7 @@ def save_runs_comparison(path):
     return df
 
 
-def plot_misclassified(samples, labels, preds, probs, classes, path, n):
+def plot_misclassified(samples, labels, preds, probs, classes, path, n, split='test'):
     # most confident mistakes first — the most informative errors to discuss
     wrong = np.where(labels != preds)[0]
     wrong = wrong[np.argsort(-probs[wrong, preds[wrong]])][:n]
@@ -179,7 +189,7 @@ def plot_misclassified(samples, labels, preds, probs, classes, path, n):
         ax.set_title(f'true: {classes[labels[idx]]}\npred: {classes[preds[idx]]} '
                      f'({probs[idx, preds[idx]]:.0%})', fontsize=8)
 
-    fig.suptitle('Most confident misclassifications (test set)')
+    fig.suptitle(f'Most confident misclassifications ({split} set)')
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -187,38 +197,50 @@ def plot_misclassified(samples, labels, preds, probs, classes, path, n):
 
 def evaluate(config):
     device   = get_device(config)
+    split    = config['split']
     run_name = config['run_name'] or run_name_from_model_path(config['model_path'])
-    out_dir  = os.path.join(config['out_dir'], run_name)
+    # default (test, no TTA) → reports/<run>/ ; other settings get their own folder so nothing is overwritten
+    suffix   = ('' if split == 'test' else f'_{split}') + ('_tta' if config['tta'] else '')
+    out_dir  = os.path.join(config['out_dir'], run_name + suffix)
     os.makedirs(out_dir, exist_ok=True)
 
     print(f'Evaluating    : {config["model_path"]}')
+    print(f'Split         : {split}{"  (TTA on)" if config["tta"] else ""}')
     print(f'Device        : {device}')
     print(f'Output folder : {out_dir}')
 
     # same preprocessing as validation during training (resize 224 + CLAHE, no augmentation)
-    test_dataset = FERDataset(config['data_dir'], split='test', transform=get_transforms('test'))
-    classes      = test_dataset.classes
-    samples      = test_dataset.samples
+    if split == 'val':
+        # rebuild the exact val set train.py held out (same val_split + seed)
+        _, val_idx, _ = split_train_val(config)
+        full    = FERDataset(config['data_dir'], split='train', transform=get_transforms('test'))
+        classes = full.classes
+        samples = [full.samples[i] for i in val_idx]
+        dataset = Subset(full, val_idx)
+    else:
+        dataset = FERDataset(config['data_dir'], split='test', transform=get_transforms('test'))
+        classes = dataset.classes
+        samples = dataset.samples
     if config['limit']:
         # evenly spaced indices so every class is represented (samples are sorted by class folder)
-        idx          = np.linspace(0, len(samples) - 1, config['limit']).astype(int)
-        test_dataset = Subset(test_dataset, idx)
-        samples      = [samples[i] for i in idx]
-    loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False,
+        idx     = np.linspace(0, len(samples) - 1, config['limit']).astype(int)
+        dataset = Subset(dataset, idx)
+        samples = [samples[i] for i in idx]
+    loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=False,
                         num_workers=config['num_workers'], pin_memory=True)
-    print(f'Test images   : {len(test_dataset)}')
+    print(f'Images        : {len(dataset)}')
 
     # dropout value does not matter in eval mode, the architecture is the same
     model = EmotionNet(config['num_classes'])
     model.load_state_dict(torch.load(config['model_path'], map_location=device))
     model = model.to(device)
 
-    labels, preds, probs = predict(model, loader, device)
+    labels, preds, probs = predict(model, loader, device, tta=config['tta'])
 
     # 1) metrics
     acc      = accuracy_score(labels, preds)
     macro_f1 = f1_score(labels, preds, average='macro')
-    print(f'\nTest accuracy : {acc:.4f}')
+    print(f'\n{split.capitalize()} accuracy : {acc:.4f}')
     print(f'Macro F1      : {macro_f1:.4f}\n')
 
     report_txt = classification_report(labels, preds, labels=range(len(classes)),
@@ -226,7 +248,8 @@ def evaluate(config):
     print(report_txt)
     with open(os.path.join(out_dir, 'classification_report.txt'), 'w', encoding='utf-8') as f:
         f.write(f'Model: {config["model_path"]}\n')
-        f.write(f'Test images: {len(labels)}\n\n')
+        f.write(f'Split: {split}   TTA: {config["tta"]}\n')
+        f.write(f'Images: {len(labels)}\n\n')
         f.write(report_txt)
     report_dict = classification_report(labels, preds, labels=range(len(classes)),
                                         target_names=classes, output_dict=True, zero_division=0)
@@ -240,7 +263,7 @@ def evaluate(config):
 
     # 3) misclassified examples
     plot_misclassified(samples, labels, preds, probs, classes,
-                       os.path.join(out_dir, 'misclassified.png'), config['n_misclassified'])
+                       os.path.join(out_dir, 'misclassified.png'), config['n_misclassified'], split)
 
     # 4) training curves + 5) all-runs table, both from MLflow
     mlflow.set_tracking_uri(config['tracking_uri'])
@@ -254,10 +277,12 @@ def evaluate(config):
         print(f'Best epoch    : {best_epoch} (eval acc {best_eval_acc:.4f})')
 
         if config['log_mlflow']:
+            # e.g. final_test_acc, final_val_tta_acc — each setting keeps its own metric name
+            key = f'final_{split}' + ('_tta' if config['tta'] else '')
             with mlflow.start_run(run_id=run.info.run_id):
-                mlflow.log_metrics({'final_test_acc': acc, 'final_test_macro_f1': macro_f1})
-                mlflow.log_artifacts(out_dir, artifact_path='evaluation')
-            print('Logged test metrics and figures to the MLflow run')
+                mlflow.log_metrics({f'{key}_acc': acc, f'{key}_macro_f1': macro_f1})
+                mlflow.log_artifacts(out_dir, artifact_path=f'evaluation{suffix}')
+            print(f'Logged {key}_acc and figures to the MLflow run')
 
     save_runs_comparison(os.path.join(out_dir, 'runs_comparison.csv'))
 
@@ -280,6 +305,10 @@ if __name__ == '__main__':
     parser.add_argument('--n_misclassified', type=int, default=CONFIG['n_misclassified'])
     parser.add_argument('--log_mlflow',      action='store_true', default=CONFIG['log_mlflow'])
     parser.add_argument('--limit',           type=int, default=CONFIG['limit'])
+    parser.add_argument('--split',           type=str, default=CONFIG['split'], choices=['test', 'val'])
+    parser.add_argument('--tta',             action='store_true', default=CONFIG['tta'])
+    parser.add_argument('--val_split',       type=float, default=CONFIG['val_split'])
+    parser.add_argument('--seed',            type=int, default=CONFIG['seed'])
 
     args = parser.parse_args()
     CONFIG.update(vars(args))

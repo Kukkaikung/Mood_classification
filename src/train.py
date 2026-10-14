@@ -23,6 +23,8 @@ CONFIG = {
     'run_name'   : 'final_with_val',
     'val_split'  : 0.1,      # NEW — fraction of train held out for validation (stratified)
     'seed'       : 42,       # NEW — fixed seed so the split is identical every run
+    'label_smoothing': 0.0,  # NEW — 0.1 = target 90% on the true class instead of 100% (less overconfident)
+    'random_erasing' : 0.0,  # NEW — probability of blanking a random patch of each train image (0.25 typical)
     'device'     : 'cuda',   # 'cuda' or 'cpu'
     'gpu_id'     : 0,        # 0, 1, 2... or 'all' for all GPUs
     'num_workers': 4,        # train loader workers; each uses ~0.5 GB RAM (lower to 2 or 0 if RAM is tight)
@@ -50,7 +52,8 @@ def split_train_val(config):
 def get_dataloaders(config, train_idx, val_idx):
     # two dataset objects so train gets augmentation and val gets test-time transforms only
     train_dataset = Subset(
-        FERDataset(config['data_dir'], split='train', transform=get_transforms('train')),
+        FERDataset(config['data_dir'], split='train',
+                   transform=get_transforms('train', random_erasing=config['random_erasing'])),
         train_idx
     )
     val_dataset = Subset(
@@ -178,7 +181,7 @@ def train(config):
         print(f'WARNING: resume=True but {config["resume_path"]} not found — starting fresh')
 
     weights   = get_class_weights(config, train_labels, device)
-    criterion = nn.CrossEntropyLoss(weight=weights)
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=config['label_smoothing'])
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -263,6 +266,8 @@ if __name__ == '__main__':
     parser.add_argument('--run_name',             type=str,   default=CONFIG['run_name'])
     parser.add_argument('--val_split',            type=float, default=CONFIG['val_split'])
     parser.add_argument('--seed',                 type=int,   default=CONFIG['seed'])
+    parser.add_argument('--label_smoothing',      type=float, default=CONFIG['label_smoothing'])
+    parser.add_argument('--random_erasing',       type=float, default=CONFIG['random_erasing'])
     parser.add_argument('--device',               type=str,   default=CONFIG['device'])
     parser.add_argument('--gpu_id',               type=str,   default=str(CONFIG['gpu_id']))
     parser.add_argument('--num_workers',          type=int,   default=CONFIG['num_workers'])
@@ -281,6 +286,8 @@ if __name__ == '__main__':
     CONFIG['run_name']            = args.run_name
     CONFIG['val_split']           = args.val_split
     CONFIG['seed']                = args.seed
+    CONFIG['label_smoothing']     = args.label_smoothing
+    CONFIG['random_erasing']      = args.random_erasing
     CONFIG['device']              = args.device
     CONFIG['gpu_id']              = int(args.gpu_id) if args.gpu_id.isdigit() else args.gpu_id
     CONFIG['num_workers']         = args.num_workers
