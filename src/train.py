@@ -7,63 +7,80 @@ from torch.utils.data import DataLoader
 import mlflow
 import mlflow.pytorch
 import argparse
+from torch.utils.data import Subset
+from sklearn.model_selection import train_test_split
 from src.dataset import FERDataset, get_transforms
 from src.model import EmotionNet
 
 
 CONFIG = {
     'data_dir'   : 'data/raw',
-    'epochs'     : 50,
+    'epochs'     : 80,
     'batch_size' : 32,
     'lr'         : 1e-3,
     'num_classes': 7,
-    'dropout'    : 0.3,
-    'run_name'   : 'clahe_epoch50',
+    'dropout'    : 0.5,
+    'run_name'   : 'final_with_val',
+    'val_split'  : 0.1,      # NEW — fraction of train held out for validation (stratified)
+    'seed'       : 42,       # NEW — fixed seed so the split is identical every run
     'device'     : 'cuda',   # 'cuda' or 'cpu'
     'gpu_id'     : 0,        # 0, 1, 2... or 'all' for all GPUs
-    'num_workers': 0,        # 0 for Windows
+    'num_workers': 4,        # train loader workers; each uses ~0.5 GB RAM (lower to 2 or 0 if RAM is tight)
     'resume'     : False,    # set True to continue from checkpoint
     'resume_path': 'models/best.pth',
     'early_stop_patience' : 10,
 }
 
 
-def get_dataloaders(config):
-    train_dataset = FERDataset(
-        config['data_dir'],
-        split='train',
-        transform=get_transforms('train')
+def split_train_val(config):
+    # stratified split of the train folder into train / val indices
+    # test set is NOT touched during training — only src/evaluate.py uses it
+    dataset = FERDataset(config['data_dir'], split='train', transform=None)
+    labels  = [label for _, label in dataset.samples]
+    train_idx, val_idx = train_test_split(
+        list(range(len(labels))),
+        test_size=config['val_split'],
+        stratify=labels,
+        random_state=config['seed']
     )
-    test_dataset = FERDataset(
-        config['data_dir'],
-        split='test',
-        transform=get_transforms('test')
+    train_labels = [labels[i] for i in train_idx]
+    return train_idx, val_idx, train_labels
+
+
+def get_dataloaders(config, train_idx, val_idx):
+    # two dataset objects so train gets augmentation and val gets test-time transforms only
+    train_dataset = Subset(
+        FERDataset(config['data_dir'], split='train', transform=get_transforms('train')),
+        train_idx
     )
+    val_dataset = Subset(
+        FERDataset(config['data_dir'], split='train', transform=get_transforms('test')),
+        val_idx
+    )
+    # persistent_workers keeps worker processes alive between epochs (spawning is slow on Windows)
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
         num_workers=config['num_workers'],
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=config['num_workers'] > 0
     )
-    test_loader = DataLoader(
-        test_dataset,
+    # val is small and has no augmentation — loading in the main process saves RAM
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=config['batch_size'],
         shuffle=False,
-        num_workers=config['num_workers'],
+        num_workers=0,
         pin_memory=True
     )
-    return train_loader, test_loader
+    return train_loader, val_loader
 
 
-def get_class_weights(config, device):
-    dataset = FERDataset(
-        config['data_dir'],
-        split='train',
-        transform=None
-    )
+def get_class_weights(config, train_labels, device):
+    # computed from the train portion only (val excluded)
     counts = [0] * config['num_classes']
-    for _, label in dataset.samples:
+    for label in train_labels:
         counts[label] += 1
     total = sum(counts)
     weights = [total / (config['num_classes'] * c) for c in counts]
@@ -136,7 +153,9 @@ def train(config):
         print(f'GPU           : {torch.cuda.get_device_name(device)}')
         print(f'GPUs available: {torch.cuda.device_count()}')
 
-    train_loader, test_loader = get_dataloaders(config)
+    train_idx, val_idx, train_labels = split_train_val(config)
+    print(f'Train / val   : {len(train_idx)} / {len(val_idx)} images')
+    train_loader, val_loader = get_dataloaders(config, train_idx, val_idx)
 
     model = EmotionNet(config['num_classes'], config['dropout'])
 
@@ -158,7 +177,7 @@ def train(config):
     elif config.get('resume'):
         print(f'WARNING: resume=True but {config["resume_path"]} not found — starting fresh')
 
-    weights   = get_class_weights(config, device)
+    weights   = get_class_weights(config, train_labels, device)
     criterion = nn.CrossEntropyLoss(weight=weights)
 
     optimizer = torch.optim.AdamW(
@@ -179,22 +198,24 @@ def train(config):
 
     with mlflow.start_run(run_name=config['run_name']):
         mlflow.log_params(config)
+        mlflow.log_params({'n_train': len(train_idx), 'n_val': len(val_idx)})
 
         for epoch in range(config['epochs']):
             train_loss, train_acc = train_one_epoch(
                 model, train_loader, optimizer, criterion, device
             )
-            test_loss, test_acc = evaluate(
-                model, test_loader, criterion, device
+            val_loss, val_acc = evaluate(
+                model, val_loader, criterion, device
             )
 
-            scheduler.step(test_acc)
+            # UPDATED — scheduler, checkpoint and early stopping follow val acc, not test acc
+            scheduler.step(val_acc)
             current_lr = optimizer.param_groups[0]['lr']
 
             print(
                 f"Epoch {epoch+1:02d}/{config['epochs']} | "
                 f"train loss: {train_loss:.4f}  acc: {train_acc:.4f} | "
-                f"test  loss: {test_loss:.4f}  acc: {test_acc:.4f} | "
+                f"val loss: {val_loss:.4f}  acc: {val_acc:.4f} | "
                 f"lr: {current_lr:.6f} | "
                 f"no_improve: {no_improve}"
             )
@@ -202,18 +223,18 @@ def train(config):
             mlflow.log_metrics({
                 'train_loss' : train_loss,
                 'train_acc'  : train_acc,
-                'test_loss'  : test_loss,
-                'test_acc'   : test_acc,
+                'val_loss'   : val_loss,
+                'val_acc'    : val_acc,
                 'lr'         : current_lr,
                 'no_improve' : no_improve,
             }, step=epoch)
 
-            if test_acc > best_acc:
-                best_acc   = test_acc
+            if val_acc > best_acc:
+                best_acc   = val_acc
                 no_improve = 0
                 # UPDATED — save to run-specific path instead of overwriting best.pth
                 torch.save(model.state_dict(), save_path)
-                print(f'  >> saved best model — acc: {best_acc:.4f} → {save_path}')
+                print(f'  >> saved best model — val acc: {best_acc:.4f} → {save_path}')
             else:
                 no_improve += 1
                 if no_improve >= config['early_stop_patience']:
@@ -223,9 +244,10 @@ def train(config):
                     )
                     break
 
-        mlflow.log_metric('best_test_acc', best_acc)
-        print(f'\nTraining done. Best accuracy: {best_acc:.4f}')
+        mlflow.log_metric('best_val_acc', best_acc)
+        print(f'\nTraining done. Best val accuracy: {best_acc:.4f}')
         print(f'Model saved to: {save_path}')
+        print('Run src/evaluate.py on this checkpoint for the final test-set score.')
 
 
 if __name__ == '__main__':
@@ -239,6 +261,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_classes',          type=int,   default=CONFIG['num_classes'])
     parser.add_argument('--dropout',              type=float, default=CONFIG['dropout'])
     parser.add_argument('--run_name',             type=str,   default=CONFIG['run_name'])
+    parser.add_argument('--val_split',            type=float, default=CONFIG['val_split'])
+    parser.add_argument('--seed',                 type=int,   default=CONFIG['seed'])
     parser.add_argument('--device',               type=str,   default=CONFIG['device'])
     parser.add_argument('--gpu_id',               type=str,   default=str(CONFIG['gpu_id']))
     parser.add_argument('--num_workers',          type=int,   default=CONFIG['num_workers'])
@@ -255,6 +279,8 @@ if __name__ == '__main__':
     CONFIG['num_classes']         = args.num_classes
     CONFIG['dropout']             = args.dropout
     CONFIG['run_name']            = args.run_name
+    CONFIG['val_split']           = args.val_split
+    CONFIG['seed']                = args.seed
     CONFIG['device']              = args.device
     CONFIG['gpu_id']              = int(args.gpu_id) if args.gpu_id.isdigit() else args.gpu_id
     CONFIG['num_workers']         = args.num_workers
