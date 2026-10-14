@@ -73,8 +73,13 @@ def load_model(model_path, device):
     return model
 
 
-def get_inference_transform():
-    return transforms.Compose([
+def get_inference_transform(grayscale=False):
+    steps = []
+    if grayscale:
+        # FER training images are grayscale — convert webcam colour crops to match
+        # 3 channels so the model input shape stays the same
+        steps.append(transforms.Grayscale(num_output_channels=3))
+    return transforms.Compose(steps + [
         transforms.Resize((224, 224)),
         transforms.Lambda(apply_clahe),
         transforms.ToTensor(),
@@ -289,16 +294,18 @@ def run_inference(
     show_window     = True,
     max_faces       = 20,
     smoothing_window = 10,    # FIX 1 — smoothing window size
+    grayscale        = False,
 ):
     device = torch.device(device_name if torch.cuda.is_available() else 'cpu')
     print(f'Inference on  : {device}')
+    print(f'Grayscale     : {"on" if grayscale else "off"}')
     print(f'Smooth window : {smoothing_window} frames')
     print(f'Min confidence: {MIN_CONFIDENCE:.0%}')
     print(f'Predict every : {PREDICT_EVERY_N_FRAMES} frames')
 
     model     = load_model(model_path, device)
     mtcnn     = MTCNN(keep_all=True, device=device, min_face_size=20)
-    transform = get_inference_transform()
+    transform = get_inference_transform(grayscale)
 
     cap = open_capture(source)
 
@@ -401,6 +408,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_faces',        type=int, default=20)
     parser.add_argument('--smoothing_window', type=int, default=10)
     parser.add_argument('--no_window',        action='store_true')
+    parser.add_argument('--grayscale',        action='store_true',
+                        help='convert face crops to grayscale before the model (matches FER training data)')
     parser.add_argument('--list_cameras',     action='store_true',
                         help='list available camera indices and exit')
     args = parser.parse_args()
@@ -416,4 +425,5 @@ if __name__ == '__main__':
         show_window      = not args.no_window,
         max_faces        = args.max_faces,
         smoothing_window = args.smoothing_window,
+        grayscale        = args.grayscale,
     )
