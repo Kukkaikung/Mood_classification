@@ -80,6 +80,9 @@ def get_inference_transform(grayscale=False):
         # 3 channels so the model input shape stays the same
         steps.append(transforms.Grayscale(num_output_channels=3))
     return transforms.Compose(steps + [
+        # FER images are 48x48 — shrink first so webcam crops have the same (smooth, low-detail) look
+        # and CLAHE doesn't amplify sensor noise. No-op for FER images, so test accuracy is unaffected
+        transforms.Resize((48, 48)),
         transforms.Resize((224, 224)),
         transforms.Lambda(apply_clahe),
         transforms.ToTensor(),
@@ -306,10 +309,12 @@ def run_inference(
     grayscale        = False,
     debug_dir        = None,  # save model-view face crops + raw scores here
     debug_every      = 5,     # save every Nth prediction (~2 images/sec)
+    margin           = 0.0,   # expand face box by this fraction on each side (0.2 = 20%)
 ):
     device = torch.device(device_name if torch.cuda.is_available() else 'cpu')
     print(f'Inference on  : {device}')
     print(f'Grayscale     : {"on" if grayscale else "off"}')
+    print(f'Face margin   : {margin:.0%}')
     if debug_dir:
         os.makedirs(debug_dir, exist_ok=True)
         print(f'Debug crops   : {debug_dir} (every {debug_every} predictions)')
@@ -361,6 +366,10 @@ def run_inference(
                 boxes = boxes[:max_faces]
                 for i, box in enumerate(boxes):
                     x1, y1, x2, y2 = [int(b) for b in box]
+                    if margin > 0:
+                        # widen the tight MTCNN box so forehead/chin are included, like FER crops
+                        mw, mh = int((x2 - x1) * margin), int((y2 - y1) * margin)
+                        x1, y1, x2, y2 = x1 - mw, y1 - mh, x2 + mw, y2 + mh
                     x1 = max(0, x1)
                     y1 = max(0, y1)
                     x2 = min(frame.shape[1], x2)
@@ -435,6 +444,8 @@ if __name__ == '__main__':
                         help='save face crops as the model sees them, named by top-3 raw scores')
     parser.add_argument('--debug_every',      type=int, default=5,
                         help='with --debug_dir: save every Nth prediction')
+    parser.add_argument('--margin',           type=float, default=0.0,
+                        help='expand detected face box by this fraction on each side (e.g. 0.2)')
     parser.add_argument('--list_cameras',     action='store_true',
                         help='list available camera indices and exit')
     args = parser.parse_args()
@@ -453,4 +464,5 @@ if __name__ == '__main__':
         grayscale        = args.grayscale,
         debug_dir        = args.debug_dir,
         debug_every      = args.debug_every,
+        margin           = args.margin,
     )
