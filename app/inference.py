@@ -393,7 +393,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='AudiMood Inference')
     parser.add_argument('--model_path',       type=str,
-                        default='models/best_optimized_dropout05_es.pth')
+                        default='models/best_second_train_with_val_ls_erasing.pth')
     parser.add_argument('--source',           type=str, default='webcam',
                         help="camera index (0, 1, 2 ...), 'webcam' (= 0), "
                              "or a path to a video file")
