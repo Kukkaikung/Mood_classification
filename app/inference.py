@@ -27,7 +27,7 @@ EMOTION_COLORS = {
 }
 
 # FIX 2 — minimum confidence to show emotion label
-MIN_CONFIDENCE = 0.45
+MIN_CONFIDENCE = 0.3
 
 # FIX 3 — only run model every N frames
 PREDICT_EVERY_N_FRAMES = 3
@@ -86,6 +86,15 @@ def get_inference_transform(grayscale=False):
         transforms.Normalize([0.485, 0.456, 0.406],
                              [0.229, 0.224, 0.225])
     ])
+
+
+def save_debug_crop(face_crop, transform, scores, debug_dir, index):
+    """Save the face exactly as the model sees it (before ToTensor/Normalize),
+    named by the raw top-3 scores, e.g. 0042_happy52_sad31_neutral10.png"""
+    model_view = transforms.Compose(transform.transforms[:-2])(face_crop)
+    top3  = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:3]
+    name  = f'{index:04d}_' + '_'.join(f'{e}{s * 100:.0f}' for e, s in top3) + '.png'
+    model_view.save(os.path.join(debug_dir, name))
 
 
 def predict_emotion(face_crop, model, transform, device):
@@ -295,10 +304,16 @@ def run_inference(
     max_faces       = 20,
     smoothing_window = 10,    # FIX 1 — smoothing window size
     grayscale        = False,
+    debug_dir        = None,  # save model-view face crops + raw scores here
+    debug_every      = 5,     # save every Nth prediction (~2 images/sec)
 ):
     device = torch.device(device_name if torch.cuda.is_available() else 'cpu')
     print(f'Inference on  : {device}')
     print(f'Grayscale     : {"on" if grayscale else "off"}')
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
+        print(f'Debug crops   : {debug_dir} (every {debug_every} predictions)')
+    n_predictions = 0
     print(f'Smooth window : {smoothing_window} frames')
     print(f'Min confidence: {MIN_CONFIDENCE:.0%}')
     print(f'Predict every : {PREDICT_EVERY_N_FRAMES} frames')
@@ -359,6 +374,12 @@ def run_inference(
                         face_crop, model, transform, device
                     )
 
+                    # raw (unsmoothed) scores go in the filename
+                    n_predictions += 1
+                    if debug_dir and n_predictions % debug_every == 0:
+                        save_debug_crop(face_crop, transform, scores,
+                                        debug_dir, n_predictions // debug_every)
+
                     # FIX 1 — smooth scores through history window
                     smoothed_scores = smoothers[i].update(scores)
                     smoothed_emotion = max(smoothed_scores, key=smoothed_scores.get)
@@ -410,6 +431,10 @@ if __name__ == '__main__':
     parser.add_argument('--no_window',        action='store_true')
     parser.add_argument('--grayscale',        action='store_true',
                         help='convert face crops to grayscale before the model (matches FER training data)')
+    parser.add_argument('--debug_dir',        type=str, default=None,
+                        help='save face crops as the model sees them, named by top-3 raw scores')
+    parser.add_argument('--debug_every',      type=int, default=5,
+                        help='with --debug_dir: save every Nth prediction')
     parser.add_argument('--list_cameras',     action='store_true',
                         help='list available camera indices and exit')
     args = parser.parse_args()
@@ -426,4 +451,6 @@ if __name__ == '__main__':
         max_faces        = args.max_faces,
         smoothing_window = args.smoothing_window,
         grayscale        = args.grayscale,
+        debug_dir        = args.debug_dir,
+        debug_every      = args.debug_every,
     )
