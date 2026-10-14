@@ -37,3 +37,6 @@ Thumbs.db
 
 #test folder
 test/
+
+# inference debug crops (contain webcam face images)
+debug_crops/
