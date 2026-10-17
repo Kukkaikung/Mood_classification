@@ -40,3 +40,6 @@ test/
 
 # inference debug crops (contain webcam face images)
 debug_crops/
+
+# session CSV logs written by app/inference.py
+logs/

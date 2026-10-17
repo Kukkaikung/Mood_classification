@@ -1,5 +1,6 @@
 import os
 import sys
+import csv
 import cv2
 import torch
 import numpy as np
@@ -62,6 +63,38 @@ class EmotionSmoother:
 
     def reset(self):
         self.history.clear()
+
+
+class SessionLogger:
+    """
+    Writes one CSV row every interval_s seconds with the crowd emotion counts
+    shown on the mood panel. Numbers only — no face images are stored.
+    Read later by app/dashboard.py.
+    """
+    def __init__(self, log_dir='logs', interval_s=1.0):
+        os.makedirs(log_dir, exist_ok=True)
+        self.path       = os.path.join(log_dir, time.strftime('session_%Y-%m-%d_%H-%M-%S.csv'))
+        self.interval_s = interval_s
+        self.next_log   = 0.0
+        self.file       = open(self.path, 'w', newline='', encoding='utf-8')
+        self.writer     = csv.writer(self.file)
+        self.writer.writerow(['timestamp', 'elapsed_s', 'total_faces', 'uncertain']
+                             + EMOTIONS + ['dominant'])
+
+    def maybe_log(self, elapsed_s, counts, total):
+        """Write a row if interval_s has passed since the last one."""
+        if elapsed_s < self.next_log:
+            return
+        self.next_log = elapsed_s + self.interval_s
+        confident = sum(counts.values())
+        dominant  = max(counts, key=counts.get) if confident > 0 else 'none'
+        self.writer.writerow([time.strftime('%Y-%m-%d %H:%M:%S'), f'{elapsed_s:.1f}',
+                              total, total - confident]
+                             + [counts[e] for e in EMOTIONS] + [dominant])
+        self.file.flush()   # keep the file usable even if the program crashes
+
+    def close(self):
+        self.file.close()
 
 
 def load_model(model_path, device):
@@ -310,6 +343,8 @@ def run_inference(
     debug_dir        = None,  # save model-view face crops + raw scores here
     debug_every      = 5,     # save every Nth prediction (~2 images/sec)
     margin           = 0.0,   # expand face box by this fraction on each side (0.2 = 20%)
+    log_dir          = 'logs',  # session CSV folder; None = don't log
+    log_interval     = 1.0,     # seconds between CSV rows
 ):
     device = torch.device(device_name if torch.cuda.is_available() else 'cpu')
     print(f'Inference on  : {device}')
@@ -333,6 +368,14 @@ def run_inference(
         print(f'ERROR: could not open video source: {source}')
         print('Run with --list_cameras to see available camera indices')
         return
+
+    # video files are timed by their own clock (processing can be slower than playback),
+    # cameras by wall-clock time
+    is_video_file = not isinstance(parse_source(source), int)
+    logger = SessionLogger(log_dir, log_interval) if log_dir else None
+    if logger:
+        print(f'Session log   : {logger.path} (every {log_interval:g}s)')
+    start_time = time.time()
 
     print('Press Q to quit')
 
@@ -414,6 +457,11 @@ def run_inference(
         counts, ratios, total = count_emotions(emotions_list)
         frame = draw_mood_panel(frame, counts, ratios, total, fps, smoothing_window)
 
+        if logger:
+            elapsed = (cap.get(cv2.CAP_PROP_POS_MSEC) / 1000 if is_video_file
+                       else time.time() - start_time)
+            logger.maybe_log(elapsed, counts, total)
+
         if show_window:
             cv2.imshow('AudiMood — Emotion Recognition', frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -422,6 +470,9 @@ def run_inference(
 
     cap.release()
     cv2.destroyAllWindows()
+    if logger:
+        logger.close()
+        print(f'Session saved : {logger.path}')
     print('Inference stopped')
 
 
@@ -446,6 +497,12 @@ if __name__ == '__main__':
                         help='with --debug_dir: save every Nth prediction')
     parser.add_argument('--margin',           type=float, default=0.0,
                         help='expand detected face box by this fraction on each side (e.g. 0.2)')
+    parser.add_argument('--log_dir',          type=str, default='logs',
+                        help='folder for the session CSV (read by app/dashboard.py)')
+    parser.add_argument('--log_interval',     type=float, default=1.0,
+                        help='seconds between CSV rows')
+    parser.add_argument('--no_log',           action='store_true',
+                        help='do not write a session CSV')
     parser.add_argument('--list_cameras',     action='store_true',
                         help='list available camera indices and exit')
     args = parser.parse_args()
@@ -465,4 +522,6 @@ if __name__ == '__main__':
         debug_dir        = args.debug_dir,
         debug_every      = args.debug_every,
         margin           = args.margin,
+        log_dir          = None if args.no_log else args.log_dir,
+        log_interval     = args.log_interval,
     )
