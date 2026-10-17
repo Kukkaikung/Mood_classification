@@ -84,7 +84,8 @@ def main():
                 'or upload a CSV in the sidebar.')
         return
 
-    segment_s = st.sidebar.slider('Segment length (seconds)', 5, 120, 10, step=5)
+    # 1 s = one CSV row per segment (the logger writes once per second)
+    segment_s = st.sidebar.slider('Segment length (seconds)', 1, 120, 10, step=1)
 
     try:
         df = load_session(source)
