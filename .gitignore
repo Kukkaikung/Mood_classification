@@ -43,3 +43,6 @@ debug_crops/
 
 # session CSV logs written by app/inference.py
 logs/
+
+# sample videos (built from FER dataset images, which are not redistributed)
+samples/
