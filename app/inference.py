@@ -445,9 +445,11 @@ def run_inference(
             emotions_list = last_emotions
             boxes         = last_boxes
 
-        # calculate FPS
+        # calculate FPS — moving average, because skipped frames are much faster than
+        # prediction frames and the per-frame value jumps around
         curr_time = time.time()
-        fps       = 1 / (curr_time - prev_time + 1e-6)
+        inst_fps  = 1 / (curr_time - prev_time + 1e-6)
+        fps       = inst_fps if fps == 0 else 0.95 * fps + 0.05 * inst_fps
         prev_time = curr_time
 
         # draw
@@ -468,11 +470,16 @@ def run_inference(
                 print('Stopped by user')
                 break
 
+    run_time = time.time() - start_time
     cap.release()
     cv2.destroyAllWindows()
     if logger:
         logger.close()
         print(f'Session saved : {logger.path}')
+    if frame_count and run_time > 0:
+        # whole-session throughput: the number to report (includes detection, model and drawing)
+        print(f'Average FPS   : {frame_count / run_time:.1f} '
+              f'({frame_count} frames in {run_time:.1f}s, predictions on every {PREDICT_EVERY_N_FRAMES}rd frame)')
     print('Inference stopped')
 
 
